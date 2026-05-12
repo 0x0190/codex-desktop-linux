@@ -1047,7 +1047,7 @@ pid_has_webview_server_cmdline() {
     [ -d "/proc/$pid" ] || return 1
     pid_is_current_user "$pid" || return 1
     cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline" 2>/dev/null || true)"
-    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* ]]
+    [[ "$cmdline" == *"http.server $CODEX_LINUX_WEBVIEW_PORT"* || "$cmdline" == *"webview-server.py $CODEX_LINUX_WEBVIEW_PORT"* ]]
 }
 
 pid_is_webview_server() {
@@ -1244,7 +1244,7 @@ ensure_webview_server() {
     stop_owned_webview_server
 
     cd "$WEBVIEW_DIR"
-    python3 -m http.server "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1 &
+    python3 "$SCRIPT_DIR/.codex-linux/webview-server.py" "$CODEX_LINUX_WEBVIEW_PORT" --bind 127.0.0.1 &
     STARTED_WEBVIEW_PID=$!
     echo "$STARTED_WEBVIEW_PID" > "$WEBVIEW_PID_FILE"
 
