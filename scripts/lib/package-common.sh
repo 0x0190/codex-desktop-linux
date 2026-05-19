@@ -88,11 +88,33 @@ render_desktop_entry() {
     display_name="$(sed_escape_replacement "${PACKAGE_DISPLAY_NAME:-Codex Desktop}")"
     comment="$(sed_escape_replacement "${PACKAGE_COMMENT:-Run Codex Desktop on Linux}")"
 
-    sed \
-        -e "s/codex-desktop/$package_name/g" \
-        -e "s/^Name=.*/Name=$display_name/g" \
-        -e "s/^Comment=.*/Comment=$comment/g" \
-        "$DESKTOP_TEMPLATE" > "$rendered_target"
+    awk \
+        -v package_name="$package_name" \
+        -v display_name="$display_name" \
+        -v comment="$comment" '
+            BEGIN { in_desktop_entry = 0 }
+            /^\[Desktop Entry\]$/ {
+                in_desktop_entry = 1
+                gsub(/codex-desktop/, package_name)
+                print
+                next
+            }
+            /^\[/ {
+                in_desktop_entry = 0
+            }
+            {
+                gsub(/codex-desktop/, package_name)
+                if (in_desktop_entry && /^Name=/) {
+                    print "Name=" display_name
+                    next
+                }
+                if (in_desktop_entry && /^Comment=/) {
+                    print "Comment=" comment
+                    next
+                }
+                print
+            }
+        ' "$DESKTOP_TEMPLATE" > "$rendered_target"
     if package_with_updater_enabled; then
         mv "$rendered_target" "$target"
     else

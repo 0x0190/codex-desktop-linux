@@ -14,7 +14,7 @@ Actions=NewInstance;CheckForUpdates;InstallReadyUpdate;
 
 [Desktop Action NewInstance]
 Name=Open New Instance
-Exec=env CODEX_MULTI_LAUNCH=1 /usr/bin/codex-desktop %u
+Exec=env BAMF_DESKTOP_FILE_HINT=/usr/share/applications/codex-desktop.desktop CHROME_DESKTOP=codex-desktop.desktop CODEX_MULTI_LAUNCH=1 /usr/bin/codex-desktop --new-instance
 
 [Desktop Action CheckForUpdates]
 Name=Check for Updates
