@@ -751,23 +751,46 @@ function applyLinuxRemoteMobileChromeBridgePatch(source) {
     return source;
   }
 
-  const backendNeedle =
+  const legacyBackendNeedle =
     "var tE=\"x-codex-browser-use-available-backends\",X6=[\"chrome\",\"iab\",\"cdp\"];function rE(t){return X6.some(e=>e===t)}";
-  const backendReplacement =
+  const legacyBackendReplacement =
     "var tE=\"x-codex-browser-use-available-backends\",X6=[\"chrome\",\"iab\",\"cdp\"];function rE(t){return X6.some(e=>e===t)}function codexLinuxRemoteMobileBrowserBackends(e){if(e==null)return null;if(!Array.isArray(e))return[];let t=e.filter(rE);return typeof process!=`undefined`&&process.platform===`linux`&&!t.includes(`chrome`)?[`chrome`,...t]:t}";
-  const currentBackendNeedle =
+  const legacyGetterNeedle =
     "function yC(){let t=globalThis.nodeRepl?.requestMeta?.[tE];return t==null?null:Array.isArray(t)?t.filter(rE):[]}";
-  const currentBackendReplacement =
+  const legacyGetterReplacement =
     "function yC(){let t=globalThis.nodeRepl?.requestMeta?.[tE];return codexLinuxRemoteMobileBrowserBackends(t)}";
 
-  if (!source.includes(backendNeedle) || !source.includes(currentBackendNeedle)) {
+  let patched = source;
+  if (patched.includes(legacyBackendNeedle) && patched.includes(legacyGetterNeedle)) {
+    patched = patched
+      .replace(legacyBackendNeedle, legacyBackendReplacement)
+      .replace(legacyGetterNeedle, legacyGetterReplacement);
+  } else {
+    const backendDeclarationPattern =
+      /var ([A-Za-z_$][\w$]*)=\["chrome","iab","cdp"\];function ([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\)\{return \1\.some\(([A-Za-z_$][\w$]*)=>\4===\3\)\}/u;
+    const backendGetterPattern =
+      /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(([A-Za-z_$][\w$]*)\);return \2==null\?null:([A-Za-z_$][\w$]*)\(\2\)\.filter\(([A-Za-z_$][\w$]*)\)\}/u;
+    const backendDeclarationMatch = patched.match(backendDeclarationPattern);
+    const backendGetterMatch = patched.match(backendGetterPattern);
+
+    if (backendDeclarationMatch != null && backendGetterMatch != null) {
+      const [backendDeclaration, , backendAllowlistFunction] = backendDeclarationMatch;
+      const [backendGetter, getterName, backendEnvValue, readEnvFunction, backendEnvVar, parseListFunction, getterAllowlistFunction] =
+        backendGetterMatch;
+      if (backendAllowlistFunction === getterAllowlistFunction) {
+        const backendHelper =
+          `${backendDeclaration}function codexLinuxRemoteMobileBrowserBackends(e){if(e==null)return null;let t=Array.isArray(e)?e:${parseListFunction}(e),r=t.filter(${backendAllowlistFunction});return typeof process!=\`undefined\`&&process.platform===\`linux\`&&!r.includes(\`chrome\`)?[\`chrome\`,...r]:r}`;
+        const getterReplacement =
+          `function ${getterName}(){let ${backendEnvValue}=${readEnvFunction}(${backendEnvVar});return codexLinuxRemoteMobileBrowserBackends(${backendEnvValue})}`;
+        patched = patched.replace(backendDeclaration, backendHelper).replace(backendGetter, getterReplacement);
+      }
+    }
+  }
+
+  if (!patched.includes(REMOTE_MOBILE_CHROME_BRIDGE_MARKER)) {
     console.warn("WARN: Could not find Chrome browser-client backend allowlist needles - skipping remote-mobile Chrome bridge patch");
     return source;
   }
-
-  let patched = source
-    .replace(backendNeedle, backendReplacement)
-    .replace(currentBackendNeedle, currentBackendReplacement);
 
   const nativePipeNeedle =
     "function Cm(){let t=import.meta.__codexNativePipeUnavailableMessage;return typeof t==\"string\"&&t.length>0?t:\"privileged native pipe bridge is not available; browser-client is not trusted\"}";
@@ -776,7 +799,17 @@ function applyLinuxRemoteMobileChromeBridgePatch(source) {
   if (patched.includes(nativePipeNeedle)) {
     patched = patched.replace(nativePipeNeedle, nativePipeReplacement);
   } else {
-    console.warn("WARN: Could not find Chrome browser-client native pipe diagnostic needle - leaving default bridge diagnostic unchanged");
+    const currentNativePipePattern =
+      /function ([A-Za-z_$][\w$]*)\(\)\{let ([A-Za-z_$][\w$]*)=([A-Za-z_$][\w$]*)\(\);return \2\?`privileged native pipe bridge is not available; browser-client is not trusted\. Load browser-client from the \$\{[^}]+\} marketplace directory\.`:"privileged native pipe bridge is not available; browser-client is not trusted"\}/u;
+    const currentNativePipeMatch = patched.match(currentNativePipePattern);
+    if (currentNativePipeMatch != null) {
+      const [currentNativePipeNeedle, helperName, marketplaceName, marketplaceFunction] = currentNativePipeMatch;
+      const currentNativePipeReplacement =
+        `function codexLinuxRemoteMobileBrowserBridgeDiagnostic(e){return typeof process!=\`undefined\`&&process.platform===\`linux\`?\`\${e}; Chrome bridge was not exposed to this remote/mobile session. Check that the Chrome plugin, native host manifest, and x-codex-browser-use-available-backends request metadata include chrome.\`:e}function ${helperName}(){let ${marketplaceName}=${marketplaceFunction}(),codexLinuxRemoteMobileDiagnosticMessage=${marketplaceName}?\`privileged native pipe bridge is not available; browser-client is not trusted. Load browser-client from the \${${marketplaceName}} marketplace directory.\`:"privileged native pipe bridge is not available; browser-client is not trusted";return codexLinuxRemoteMobileBrowserBridgeDiagnostic(codexLinuxRemoteMobileDiagnosticMessage)}`;
+      patched = patched.replace(currentNativePipeNeedle, currentNativePipeReplacement);
+    } else {
+      console.warn("WARN: Could not find Chrome browser-client native pipe diagnostic needle - leaving default bridge diagnostic unchanged");
+    }
   }
 
   return patched;

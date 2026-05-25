@@ -199,6 +199,13 @@ function syntheticChromeBrowserClientBundle() {
     "function yC(){let t=globalThis.nodeRepl?.requestMeta?.[tE];return t==null?null:Array.isArray(t)?t.filter(rE):[]}",
   ].join("");
 }
+function syntheticCurrentChromeBrowserClientBundle() {
+  return [
+    "var R2=[\"chrome\",\"iab\",\"cdp\"];function Jb(e){return R2.some(t=>t===e)}",
+    "var Yb=\"BROWSER_USE_AVAILABLE_BACKENDS\";function lu(e){let t=globalThis.nodeRepl?.env?.[e];return typeof t==\"string\"?t:void 0}function ly(e){return(e??\"\").split(\",\").map(t=>t.trim()).filter(Boolean)}function oy(){let e=lu(Yb);return e==null?null:ly(e).filter(Jb)}",
+    "function sy(){return\"local\"}function eh(){let e=sy();return e?`privileged native pipe bridge is not available; browser-client is not trusted. Load browser-client from the ${e} marketplace directory.`:\"privileged native pipe bridge is not available; browser-client is not trusted\"}",
+  ].join("");
+}
 
 function syntheticAppServerManagerSignalsBundle() {
   return [
@@ -924,6 +931,33 @@ test("Linux remote mobile Chrome bridge patch preserves Chrome when request meta
   const browserBackendsOnly = patched.slice(0, nativePipeIndex) + patched.slice(patched.indexOf("function yC"));
   vm.runInNewContext(`${browserBackendsOnly};module.exports=yC;`, context);
   assert.deepEqual([...context.module.exports()], ["chrome", "iab"]);
+});
+
+test("Linux remote mobile Chrome bridge patch preserves Chrome with env-based backend allowlist", () => {
+  const source = syntheticCurrentChromeBrowserClientBundle();
+  const { result: patched, warnings } = captureWarnings(() => applyLinuxRemoteMobileChromeBridgePatch(source));
+
+  assert.notEqual(patched, source);
+  assert.deepEqual(warnings, []);
+  assert.match(patched, /codexLinuxRemoteMobileBrowserBackends/);
+  assert.match(patched, /codexLinuxRemoteMobileBrowserBridgeDiagnostic/);
+  assert.equal(applyLinuxRemoteMobileChromeBridgePatch(patched), patched);
+
+  const context = {
+    globalThis: {
+      nodeRepl: {
+        env: {
+          BROWSER_USE_AVAILABLE_BACKENDS: "iab",
+        },
+      },
+    },
+    module: { exports: {} },
+    process: { platform: "linux" },
+  };
+  context.globalThis.globalThis = context.globalThis;
+  vm.runInNewContext(`${patched};module.exports={backends:oy(),diagnostic:eh()};`, context);
+  assert.deepEqual([...context.module.exports.backends], ["chrome", "iab"]);
+  assert.match(context.module.exports.diagnostic, /Chrome bridge was not exposed/);
 });
 
 test("Linux remote mobile Chrome bridge patch warns when browser-client needles drift", () => {
