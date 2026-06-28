@@ -984,6 +984,14 @@ function currentChromePluginAppServerRuntimeBundleFixture() {
   ].join("");
 }
 
+function currentChromePluginCodexAppServerRuntimeBundleFixture() {
+  return [
+    "let r=require(`node:path`),o=require(`node:fs`);",
+    "async function VH(e){let t=_U(e);if(t==null)throw Error(`Missing bundled Electron Codex runtime required to sync Chrome plugin app server for ${e.nativeHostName} (resourcesPath: ${e.resourcesPath??`<none>`}).`);return AV({codexCliPath:t,codexHome:e.codexHome,nativeHostName:e.nativeHostName})}",
+    "function _U(e){return tM(e.resourcesPath)??vU(e.devRuntimeRepoRoot,[`extension`,`bin`,process.platform===`win32`?`codex.exe`:`codex`])}function vU(e,t){return null}function tM(e){return null}async function AV({codexCliPath:e}){return{codexCliPath:e}}",
+  ].join("");
+}
+
 function computerUseFeatureBundleFixture() {
   return "function me(e,{env:t=process.env,platform:n=process.platform}={}){return n!==`win32`||t.CODEX_ELECTRON_ENABLE_WINDOWS_COMPUTER_USE!==`1`?e:{...e,computerUse:!0,computerUseNodeRepl:!0}}";
 }
@@ -4856,6 +4864,67 @@ test("uses Linux managed runtime paths for current Chrome plugin app-server sync
   assert.match(patched, /NM\(e\.resourcesPath\)\?\?codexLinuxChromeNativeHostRuntimeEnv\(`CODEX_BROWSER_USE_NODE_PATH`\)/);
   assert.match(patched, /codexLinuxChromeNativeHostRuntimeFile\(e\.resourcesPath,\[\[`node-runtime`,`bin`,process\.platform===`win32`\?`node\.exe`:`node`\]\]\)/);
   assert.match(patched, /MM\(e\.resourcesPath\)\?\?codexLinuxChromeNativeHostRuntimeEnv\(`CODEX_NODE_REPL_PATH`\)/);
+});
+
+test("uses Linux Codex CLI path for Chrome plugin app-server sync", async () => {
+  const patched = applyPatchTwice(
+    applyLinuxChromeNativeHostRuntimePatch,
+    currentChromePluginCodexAppServerRuntimeBundleFixture(),
+  );
+  const files = new Set(["/home/josh/.local/bin/codex"]);
+
+  const result = await vm.runInNewContext(
+    `${patched};VH({resourcesPath:"/opt/codex/resources",devRuntimeRepoRoot:null,nativeHostName:"com.openai.codexextension"});`,
+    {
+      require(moduleName) {
+        if (moduleName === "node:path") {
+          return path;
+        }
+        if (moduleName === "node:fs") {
+          return {
+            statSync(filePath) {
+              if (!files.has(filePath)) {
+                throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+              }
+              return { isFile: () => true };
+            },
+          };
+        }
+        return require(moduleName);
+      },
+      process: {
+        platform: "linux",
+        env: {
+          CODEX_CLI_PATH: "/home/josh/.local/bin/codex",
+          PATH: "",
+        },
+      },
+    },
+  );
+
+  assert.deepEqual(JSON.parse(JSON.stringify(result)), {
+    codexCliPath: "/home/josh/.local/bin/codex",
+  });
+});
+
+test("patches multiple Chrome runtime resolvers in one Electron 42 bundle", () => {
+  const patched = applyPatchTwice(
+    applyLinuxChromeNativeHostRuntimePatch,
+    [
+      electron42BrowserUseRuntimeResolverBundleFixture(),
+      currentChromePluginCodexAppServerRuntimeBundleFixture(),
+      currentChromePluginAppServerRuntimeBundleFixture(),
+    ].join(""),
+  );
+
+  assert.match(
+    patched,
+    /codexLinuxChromeNativeHostRuntimeEntry\(codexLinuxChromeNativeHostRuntimePath\(`codex`\),`linux-path`\)\?\?Wn/,
+  );
+  assert.match(patched, /_U\(e\)\?\?codexLinuxChromeNativeHostRuntimeEnv\(`CODEX_CLI_PATH`\)\?\?codexLinuxChromeNativeHostRuntimePath\(`codex`\)/);
+  assert.match(patched, /ZB\(e\)\?\?codexLinuxChromeNativeHostRuntimeEnv\(`CODEX_CLI_PATH`\)\?\?codexLinuxChromeNativeHostRuntimePath\(`codex`\)/);
+  assert.match(patched, /NM\(e\.resourcesPath\)\?\?codexLinuxChromeNativeHostRuntimeEnv\(`CODEX_BROWSER_USE_NODE_PATH`\)/);
+  assert.equal((patched.match(/function codexLinuxChromeNativeHostRuntimeFile/g) || []).length, 1);
 });
 
 test("reports drifted Chrome native host runtime resolver as optional drift", () => {
