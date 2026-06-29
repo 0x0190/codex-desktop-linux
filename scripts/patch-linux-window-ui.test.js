@@ -4031,6 +4031,14 @@ test("keeps Linux desktop toggles visible with native Keyboard Shortcuts", () =>
     assert.match(linuxDesktopSource, /Linux source commit/);
     assert.match(linuxDesktopSource, /Copy commit/);
     assert.match(linuxDesktopSource, /Open on GitHub/);
+    assert.match(linuxDesktopSource, /"Linux source commit":\[\{key:"copyCommit"/);
+    assert.match(linuxDesktopSource, /"Generated":\[\{key:"refresh"/);
+    assert.match(linuxDesktopSource, /"Metadata file":\[\{key:"details"/);
+    assert.match(linuxDesktopSource, /control:null/);
+    assert.doesNotMatch(
+      linuxDesktopSource,
+      /control:\$\.jsxs\("div",\{className:"flex flex-wrap items-center justify-end gap-2"/,
+    );
     assert.doesNotMatch(linuxDesktopSource, /Source commit URL/);
     assert.match(linuxDesktopSource, /href:url/);
     assert.match(linuxDesktopSource, /codex-linux-get-build-info/);
