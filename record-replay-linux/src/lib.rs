@@ -4,6 +4,7 @@ pub mod manifest;
 pub mod mcp;
 pub mod recorder;
 pub mod runtime_status;
+mod secure_fs;
 pub mod skill;
 pub mod timeline;
 
@@ -30,8 +31,9 @@ pub use recorder::{
     start_session, stop_session, RecordStartOptions,
 };
 pub use runtime_status::{
-    read_runtime_status, status_path, update_active_status, update_active_status_for,
-    write_active_status, write_stopped_status, RecordingRuntimeState, RecordingRuntimeStatus,
+    read_runtime_status, refresh_runtime_status, status_path, update_active_status,
+    update_active_status_for, write_active_status, write_stopped_status, RecordingRuntimeState,
+    RecordingRuntimeStatus,
 };
 pub use skill::{
     import_skill, inspect_skill, ImportMode, ImportTarget, SkillCapability, SkillImportOptions,
@@ -270,7 +272,7 @@ pub async fn command_json(command: Commands) -> Result<Value> {
                 "diagnostics": diagnostics,
             }))
         }
-        Commands::Status => Ok(serde_json::to_value(read_runtime_status())?),
+        Commands::Status => Ok(serde_json::to_value(refresh_runtime_status())?),
         Commands::Record { command } => match command {
             RecordCommand::Start(args) => {
                 let report = start_session(RecordStartOptions {

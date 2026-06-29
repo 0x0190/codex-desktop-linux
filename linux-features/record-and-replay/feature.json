@@ -5,6 +5,7 @@
   "defaultEnabled": false,
   "entrypoints": {
     "patchDescriptors": "./patch.js",
-    "stageHook": "./stage.sh"
+    "stageHook": "./stage.sh",
+    "cleanupHook": "./cleanup.sh"
   }
 }

@@ -14,11 +14,10 @@ use std::{
 };
 
 use crate::{
-    available_recorders, bundle_draft_prompt, cancel_session, expire_session,
-    import_skill as import_skill_dir, inspect_skill as inspect_skill_dir, mark_session,
-    record_browser_trace, record_speech_context, recording_backend_catalog, start_session,
-    stop_session, validate_bundle_dir, validate_draft_prompt, ImportMode, ImportTarget,
-    RecordStartOptions, RecordingRuntimeState, SkillImportOptions,
+    available_recorders, bundle_draft_prompt, cancel_session, import_skill as import_skill_dir,
+    inspect_skill as inspect_skill_dir, mark_session, record_browser_trace, record_speech_context,
+    recording_backend_catalog, start_session, stop_session, validate_bundle_dir,
+    validate_draft_prompt, RecordStartOptions, RecordingRuntimeState, SkillImportOptions,
 };
 
 const DEFAULT_MAX_DURATION_SECONDS: u64 = 30 * 60;
@@ -398,22 +397,14 @@ impl RecordReplayLinux {
         &self,
         Parameters(params): Parameters<SkillImportParams>,
     ) -> Json<ToolResponse> {
-        let target = match import_target(params.target.as_deref()) {
-            Ok(target) => target,
-            Err(message) => return message_json("import_skill", message),
-        };
-        let mode = match import_mode(params.mode.as_deref()) {
-            Ok(mode) => mode,
-            Err(message) => return message_json("import_skill", message),
-        };
         match import_skill_dir(SkillImportOptions {
             source: expand_path(&params.source),
-            target,
-            target_dir: params.target_dir.as_deref().map(expand_path),
-            mode,
+            target: crate::skill::ImportTarget::User,
+            target_dir: None,
+            mode: crate::skill::ImportMode::Copy,
             dry_run: params.dry_run.unwrap_or(false),
             allow_unsupported: params.allow_unsupported.unwrap_or(false),
-            overwrite: params.overwrite.unwrap_or(false),
+            overwrite: false,
         }) {
             Ok(report) => tool_json(json!(report)),
             Err(error) => error_json("import_skill", error),
@@ -439,15 +430,7 @@ pub async fn serve_mcp() -> Result<()> {
 
 impl RecordReplayLinux {
     fn status_value(&self, command: &'static str) -> Value {
-        let mut status = crate::read_runtime_status();
-        if matches!(status.state, RecordingRuntimeState::Expired) {
-            if let Some(session_dir) = status.session_dir.clone() {
-                if !manifest_has_end_reason(&session_dir) {
-                    let _ = expire_session(&session_dir);
-                    status = crate::read_runtime_status();
-                }
-            }
-        }
+        let status = crate::refresh_runtime_status();
         let session_dir = status
             .session_dir
             .clone()
@@ -520,26 +503,27 @@ impl RecordReplayLinux {
             return Some(expand_path(value));
         }
         if active_first {
+            if let Some(path) = self.persisted_active_session() {
+                return Some(path);
+            }
+        }
+        if !active_first {
+            let status = crate::read_runtime_status();
+            if let Some(path) = status.session_dir {
+                return Some(path);
+            }
             if let Some(path) = self.active_session_dir() {
                 return Some(path);
             }
         }
-        if let Some(path) = crate::read_runtime_status().session_dir {
+        if let Some(path) = self.last_session_dir() {
             return Some(path);
         }
-        self.last_session_dir()
+        None
     }
 
     fn persisted_active_session(&self) -> Option<PathBuf> {
-        let status = crate::read_runtime_status();
-        if matches!(status.state, RecordingRuntimeState::Expired) {
-            if let Some(session_dir) = status.session_dir.as_ref() {
-                if !manifest_has_end_reason(session_dir) {
-                    let _ = expire_session(session_dir);
-                }
-            }
-            return None;
-        }
+        let status = crate::refresh_runtime_status();
         if !matches!(status.state, RecordingRuntimeState::Active) {
             return None;
         }
@@ -628,18 +612,10 @@ struct SkillPathParams {
 struct SkillImportParams {
     /// Skill directory containing SKILL.md.
     source: String,
-    /// user, repo, or explicit. Defaults to user.
-    target: Option<String>,
-    /// Required when target is explicit; otherwise optional override.
-    target_dir: Option<String>,
-    /// copy or symlink. Defaults to copy.
-    mode: Option<String>,
     /// Validate and report destination without writing files.
     dry_run: Option<bool>,
     /// Allow importing skills classified as unsupported on Linux.
     allow_unsupported: Option<bool>,
-    /// Replace an existing target skill directory.
-    overwrite: Option<bool>,
 }
 
 fn tool_json(value: Value) -> Json<ToolResponse> {
@@ -666,26 +642,8 @@ fn message_json(command: &str, message: impl Into<String>) -> Json<ToolResponse>
     }))
 }
 
-fn import_target(value: Option<&str>) -> std::result::Result<ImportTarget, &'static str> {
-    match value.unwrap_or("user").trim().to_ascii_lowercase().as_str() {
-        "user" => Ok(ImportTarget::User),
-        "repo" => Ok(ImportTarget::Repo),
-        "explicit" => Ok(ImportTarget::Explicit),
-        _ => Err("target must be one of: user, repo, explicit"),
-    }
-}
-
-fn import_mode(value: Option<&str>) -> std::result::Result<ImportMode, &'static str> {
-    match value.unwrap_or("copy").trim().to_ascii_lowercase().as_str() {
-        "copy" => Ok(ImportMode::Copy),
-        "symlink" => Ok(ImportMode::Symlink),
-        _ => Err("mode must be one of: copy, symlink"),
-    }
-}
-
 fn default_session_dir() -> PathBuf {
-    env::temp_dir()
-        .join("codex-record-replay")
+    crate::runtime_status::runtime_root()
         .join("event_stream")
         .join(format!(
             "{}-{}",
@@ -761,12 +719,6 @@ fn add_event_stream_fields(value: &mut Value, is_recording: bool, end_reason: Op
 
 fn manifest_for(session_dir: &Path) -> Option<crate::RecordingBundleManifest> {
     crate::manifest::read_manifest(session_dir).ok()
-}
-
-fn manifest_has_end_reason(session_dir: &Path) -> bool {
-    manifest_for(session_dir)
-        .and_then(|manifest| manifest.end_reason)
-        .is_some()
 }
 
 fn session_id_for(session_dir: &Path) -> String {

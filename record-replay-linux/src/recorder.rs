@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use chrono::Utc;
 use codex_computer_use_linux::{atspi_tree, diagnostics::DoctorReport, screenshot};
 use serde::Serialize;
@@ -43,8 +43,7 @@ pub struct RecordStartReport {
 }
 
 pub async fn start_session(options: RecordStartOptions) -> Result<RecordStartReport> {
-    fs::create_dir_all(&options.session_dir)
-        .with_context(|| format!("failed to create {}", options.session_dir.display()))?;
+    crate::secure_fs::create_new_private_dir(&options.session_dir)?;
     for dir in [
         SCREENSHOTS_DIR_NAME,
         ACCESSIBILITY_DIR_NAME,
@@ -53,17 +52,17 @@ pub async fn start_session(options: RecordStartOptions) -> Result<RecordStartRep
         INPUT_CAPTURE_DIR_NAME,
         X11_DIR_NAME,
     ] {
-        fs::create_dir_all(options.session_dir.join(dir))
+        crate::secure_fs::create_private_dir_all(&options.session_dir.join(dir))
             .with_context(|| format!("failed to create bundle directory {dir}"))?;
     }
-    fs::write(options.session_dir.join(TIMELINE_FILE_NAME), "")
+    crate::secure_fs::write_private_file(&options.session_dir.join(TIMELINE_FILE_NAME), "")
         .with_context(|| "failed to initialize timeline")?;
 
     codex_computer_use_linux::diagnostics::hydrate_session_bus_env();
     let diagnostics = codex_computer_use_linux::diagnostics::doctor_report();
     let backend_catalog = recording_backend_catalog(&diagnostics);
-    fs::write(
-        options.session_dir.join(DIAGNOSTICS_FILE_NAME),
+    crate::secure_fs::write_private_file(
+        &options.session_dir.join(DIAGNOSTICS_FILE_NAME),
         format!("{}\n", serde_json::to_string_pretty(&diagnostics)?),
     )
     .with_context(|| "failed to write diagnostics snapshot")?;
@@ -166,6 +165,8 @@ pub async fn start_session(options: RecordStartOptions) -> Result<RecordStartRep
 }
 
 pub fn mark_session(bundle_dir: &Path, note: &str) -> Result<crate::timeline::TimelineRecord> {
+    let _lock = crate::secure_fs::lock_directory(bundle_dir, ".recording.lock")?;
+    ensure_bundle_open(bundle_dir)?;
     let record = append_timeline_record(
         bundle_dir,
         TimelineEvent::UserMarker {
@@ -181,6 +182,8 @@ pub fn record_speech_context(
     transcript: &str,
     source: Option<String>,
 ) -> Result<crate::timeline::TimelineRecord> {
+    let _lock = crate::secure_fs::lock_directory(bundle_dir, ".recording.lock")?;
+    ensure_bundle_open(bundle_dir)?;
     let record = append_timeline_record(
         bundle_dir,
         TimelineEvent::SpeechContext {
@@ -199,15 +202,17 @@ pub fn record_browser_trace(
     title: Option<String>,
     source: Option<String>,
 ) -> Result<crate::timeline::TimelineRecord> {
+    let _lock = crate::secure_fs::lock_directory(bundle_dir, ".recording.lock")?;
+    ensure_bundle_open(bundle_dir)?;
     let browser_dir = bundle_dir.join(BROWSER_DIR_NAME);
-    fs::create_dir_all(&browser_dir)
+    crate::secure_fs::create_private_dir_all(&browser_dir)
         .with_context(|| format!("failed to create {}", browser_dir.display()))?;
     let relative = format!(
         "{BROWSER_DIR_NAME}/{:04}-trace.json",
         next_artifact_index(&browser_dir)?
     );
-    fs::write(
-        bundle_dir.join(&relative),
+    crate::secure_fs::write_private_file(
+        &bundle_dir.join(&relative),
         format!("{}\n", serde_json::to_string_pretty(&trace)?),
     )
     .with_context(|| format!("failed to write browser trace {relative}"))?;
@@ -272,7 +277,7 @@ async fn capture_initial_screenshot(bundle_dir: &Path) -> Result<Option<Timeline
         "png"
     };
     let relative = format!("{SCREENSHOTS_DIR_NAME}/0000.{extension}");
-    fs::write(bundle_dir.join(&relative), raw.bytes)
+    crate::secure_fs::write_private_file(&bundle_dir.join(&relative), raw.bytes)
         .with_context(|| format!("failed to write screenshot {relative}"))?;
     Ok(Some(TimelineEvent::Screenshot {
         file: relative,
@@ -286,8 +291,8 @@ async fn capture_initial_accessibility(
 ) -> Result<Option<TimelineEvent>> {
     let nodes = atspi_tree::snapshot_tree(app_id, None, 120, 12).await?;
     let relative = format!("{ACCESSIBILITY_DIR_NAME}/0000.json");
-    fs::write(
-        bundle_dir.join(&relative),
+    crate::secure_fs::write_private_file(
+        &bundle_dir.join(&relative),
         format!("{}\n", serde_json::to_string_pretty(&nodes)?),
     )
     .with_context(|| format!("failed to write accessibility snapshot {relative}"))?;
@@ -397,11 +402,11 @@ fn write_provider_evidence(
     data: Value,
 ) -> Result<TimelineEvent> {
     let provider_dir = bundle_dir.join(dir_name);
-    fs::create_dir_all(&provider_dir)
+    crate::secure_fs::create_private_dir_all(&provider_dir)
         .with_context(|| format!("failed to create {}", provider_dir.display()))?;
     let relative = format!("{dir_name}/{file_name}");
-    fs::write(
-        bundle_dir.join(&relative),
+    crate::secure_fs::write_private_file(
+        &bundle_dir.join(&relative),
         format!("{}\n", serde_json::to_string_pretty(&data)?),
     )
     .with_context(|| format!("failed to write provider evidence {relative}"))?;
@@ -478,11 +483,32 @@ fn finalize_session(
     event: TimelineEvent,
     update_status: impl FnOnce(&Path) -> Result<crate::runtime_status::RecordingRuntimeStatus>,
 ) -> Result<crate::timeline::TimelineRecord> {
+    let _lock = crate::secure_fs::lock_directory(bundle_dir, ".recording.lock")?;
     let mut manifest = crate::manifest::read_manifest(bundle_dir)?;
+    if let Some(existing_reason) = manifest.end_reason.as_deref() {
+        bail!("recording bundle is already sealed: {existing_reason}");
+    }
     manifest.ended_at = Some(now_timestamp());
     manifest.end_reason = Some(end_reason.to_string());
     write_manifest(bundle_dir, &manifest)?;
     let record = append_timeline_record(bundle_dir, event)?;
     let _ = update_status(bundle_dir);
     Ok(record)
+}
+
+fn ensure_bundle_open(bundle_dir: &Path) -> Result<()> {
+    let manifest = crate::manifest::read_manifest(bundle_dir)?;
+    if let Some(reason) = manifest.end_reason.as_deref() {
+        bail!("recording bundle is sealed: {reason}");
+    }
+    let status = crate::runtime_status::read_runtime_status();
+    if status.session_dir.as_deref() == Some(bundle_dir)
+        && matches!(
+            status.state,
+            crate::runtime_status::RecordingRuntimeState::Expired
+        )
+    {
+        bail!("recording bundle is expired");
+    }
+    Ok(())
 }

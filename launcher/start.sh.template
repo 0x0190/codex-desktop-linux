@@ -610,6 +610,7 @@ bundled_plugin_version() {
 
     python3 - "$plugin_json" <<'PY'
 import json
+import re
 import sys
 
 try:
@@ -620,7 +621,10 @@ except (OSError, json.JSONDecodeError):
 
 if not isinstance(version, str) or not version.strip():
     raise SystemExit(1)
-print(version.strip())
+version = version.strip()
+if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+-]{0,127}", version) is None:
+    raise SystemExit(1)
+print(version)
 PY
 }
 

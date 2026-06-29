@@ -6,6 +6,9 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct SkillInspection {
     pub ok: bool,
@@ -110,12 +113,12 @@ pub fn inspect_skill(source: &Path) -> Result<SkillInspection> {
 
     if inspection.name.is_none() {
         inspection
-            .warnings
+            .blockers
             .push("SKILL.md frontmatter is missing name".to_string());
     }
     if inspection.description.is_none() {
         inspection
-            .warnings
+            .blockers
             .push("SKILL.md frontmatter is missing description".to_string());
     }
 
@@ -214,14 +217,15 @@ fn scan_skill_tree(skill_dir: &Path, inspection: &mut SkillInspection) -> Result
             files_seen += 1;
             if files_seen > 512 {
                 inspection
-                    .warnings
+                    .blockers
                     .push("skill scan stopped after 512 files".to_string());
                 return Ok(());
             }
             if metadata.len() > 256 * 1024 {
-                inspection
-                    .warnings
-                    .push(format!("large file skipped: {}", relative.display()));
+                inspection.blockers.push(format!(
+                    "large file is too large to inspect: {}",
+                    relative.display()
+                ));
                 continue;
             }
             if is_probably_executable(&metadata, &path) {
@@ -389,6 +393,7 @@ fn import_destination(
 
 fn copy_skill_dir(source: &Path, destination: &Path) -> Result<()> {
     fs::create_dir_all(destination)?;
+    set_normalized_dir_mode(destination)?;
     let mut stack = vec![source.to_path_buf()];
     while let Some(dir) = stack.pop() {
         for entry in fs::read_dir(&dir)? {
@@ -402,10 +407,12 @@ fn copy_skill_dir(source: &Path, destination: &Path) -> Result<()> {
             }
             if metadata.is_dir() {
                 fs::create_dir_all(&target)?;
+                set_normalized_dir_mode(&target)?;
                 stack.push(path);
             } else if metadata.is_file() {
                 fs::copy(&path, &target)
                     .with_context(|| format!("failed to copy {}", relative.display()))?;
+                set_normalized_file_mode(&target, copy_as_executable(&metadata, &path))?;
             } else {
                 bail!("refusing to copy non-regular file: {}", relative.display());
             }
@@ -466,6 +473,36 @@ fn safe_skill_dir_name(value: &str) -> String {
 fn is_direct_child_name(value: &str) -> bool {
     let mut components = Path::new(value).components();
     matches!(components.next(), Some(Component::Normal(_))) && components.next().is_none()
+}
+
+fn set_normalized_dir_mode(path: &Path) -> Result<()> {
+    #[cfg(unix)]
+    {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o755))
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn set_normalized_file_mode(path: &Path, executable: bool) -> Result<()> {
+    #[cfg(unix)]
+    {
+        let mode = if executable { 0o755 } else { 0o644 };
+        fs::set_permissions(path, fs::Permissions::from_mode(mode))
+            .with_context(|| format!("failed to chmod {}", path.display()))?;
+    }
+    Ok(())
+}
+
+fn copy_as_executable(metadata: &fs::Metadata, path: &Path) -> bool {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.eq_ignore_ascii_case("SKILL.md"))
+    {
+        return false;
+    }
+    is_probably_executable(metadata, path)
 }
 
 fn home_dir() -> Option<PathBuf> {

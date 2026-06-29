@@ -3,8 +3,6 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{
     fmt, fs,
-    fs::OpenOptions,
-    io::Write,
     path::{Path, PathBuf},
 };
 
@@ -212,6 +210,7 @@ fn read_timeline_file(path: &Path) -> Result<Vec<TimelineRecord>> {
 }
 
 pub fn append_timeline_record(bundle_dir: &Path, event: TimelineEvent) -> Result<TimelineRecord> {
+    let _lock = crate::secure_fs::lock_directory(bundle_dir, ".timeline.lock")?;
     let path = bundle_dir.join(crate::manifest::TIMELINE_FILE_NAME);
     let next_index = if path.exists() {
         fs::read_to_string(&path)
@@ -223,13 +222,7 @@ pub fn append_timeline_record(bundle_dir: &Path, event: TimelineEvent) -> Result
         0
     };
     let record = TimelineRecord::new(next_index, crate::recorder::now_timestamp(), event);
-    let mut file = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
-        .with_context(|| format!("failed to open {}", path.display()))?;
-    writeln!(file, "{}", record.to_json_line()?)
-        .with_context(|| format!("failed to append {}", path.display()))?;
+    crate::secure_fs::append_private_line(&path, &record.to_json_line()?)?;
     Ok(record)
 }
 

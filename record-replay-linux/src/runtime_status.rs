@@ -89,6 +89,19 @@ pub fn read_runtime_status() -> RecordingRuntimeStatus {
     status.refresh_expiry()
 }
 
+pub fn refresh_runtime_status() -> RecordingRuntimeStatus {
+    let status = read_runtime_status();
+    if matches!(status.state, RecordingRuntimeState::Expired) {
+        if let Some(session_dir) = status.session_dir.as_ref() {
+            if !manifest_has_end_reason(session_dir) {
+                let _ = crate::recorder::expire_session(session_dir);
+            }
+        }
+        return read_runtime_status();
+    }
+    status
+}
+
 pub fn write_active_status(
     session_dir: &Path,
     goal: Option<String>,
@@ -188,14 +201,17 @@ pub fn write_expired_status(session_dir: &Path) -> Result<RecordingRuntimeStatus
 
 fn write_status(path: &Path, status: &RecordingRuntimeStatus) -> Result<()> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
+        crate::secure_fs::create_private_dir_all(parent)
             .with_context(|| format!("failed to create status directory {}", parent.display()))?;
     }
-    fs::write(path, format!("{}\n", serde_json::to_string_pretty(status)?))
-        .with_context(|| format!("failed to write {}", path.display()))
+    crate::secure_fs::write_private_file(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(status)?),
+    )
+    .with_context(|| format!("failed to write {}", path.display()))
 }
 
-fn runtime_root() -> PathBuf {
+pub(crate) fn runtime_root() -> PathBuf {
     env::var_os("XDG_RUNTIME_DIR")
         .map(PathBuf::from)
         .or_else(|| {
@@ -203,5 +219,25 @@ fn runtime_root() -> PathBuf {
                 .map(PathBuf::from)
                 .map(|state| state.join("run"))
         })
-        .unwrap_or_else(env::temp_dir)
+        .unwrap_or_else(|| env::temp_dir().join(format!("codex-record-replay-{}", effective_uid())))
+}
+
+fn manifest_has_end_reason(session_dir: &Path) -> bool {
+    crate::manifest::read_manifest(session_dir)
+        .ok()
+        .and_then(|manifest| manifest.end_reason)
+        .is_some()
+}
+
+#[cfg(unix)]
+fn effective_uid() -> u32 {
+    extern "C" {
+        fn geteuid() -> u32;
+    }
+    unsafe { geteuid() }
+}
+
+#[cfg(not(unix))]
+fn effective_uid() -> u32 {
+    0
 }

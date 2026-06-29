@@ -175,7 +175,7 @@ pub fn read_manifest(bundle_dir: &Path) -> Result<RecordingBundleManifest> {
 
 pub fn write_manifest(bundle_dir: &Path, manifest: &RecordingBundleManifest) -> Result<()> {
     let path = bundle_dir.join(MANIFEST_FILE_NAME);
-    fs::write(
+    crate::secure_fs::write_private_file(
         &path,
         format!("{}\n", serde_json::to_string_pretty(manifest)?),
     )
@@ -234,12 +234,23 @@ pub fn validate_bundle_dir(bundle_dir: &Path) -> Result<BundleValidationReport> 
         if timeline_path.exists() {
             let raw = fs::read_to_string(&timeline_path)
                 .with_context(|| format!("failed to read {}", timeline_path.display()))?;
+            let mut expected_timeline_index = 0u64;
             for (line_index, line) in raw.lines().enumerate() {
                 if line.trim().is_empty() {
                     continue;
                 }
                 match crate::timeline::parse_timeline_line(line) {
                     Ok(record) => {
+                        if record.index != expected_timeline_index {
+                            report.errors.push(BundleValidationError::InvalidField {
+                                field: format!("timeline:{}", line_index + 1),
+                                reason: format!(
+                                    "expected index {expected_timeline_index}, got {}",
+                                    record.index
+                                ),
+                            });
+                        }
+                        expected_timeline_index += 1;
                         let timeline_report = record.validate();
                         report
                             .errors

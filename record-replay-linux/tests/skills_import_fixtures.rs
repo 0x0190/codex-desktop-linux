@@ -1,5 +1,6 @@
 use std::{
     fs,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
 };
 
@@ -166,4 +167,73 @@ fn dotdot_skill_name_cannot_escape_import_root() {
 
     assert!(result.is_err());
     assert!(!temp.path().join("SKILL.md").exists());
+}
+
+#[test]
+fn missing_frontmatter_is_a_blocker_for_import() {
+    let temp = tempfile::tempdir().unwrap();
+    let skill = temp.path().join("missing-frontmatter");
+    fs::create_dir(&skill).unwrap();
+    fs::write(skill.join("SKILL.md"), "No frontmatter here.\n").unwrap();
+
+    let inspection = inspect_skill(&skill).unwrap();
+    assert!(!inspection.ok);
+    assert!(inspection
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("frontmatter")));
+
+    let target = temp.path().join("target");
+    assert!(import_skill(import_options(&skill, &target)).is_err());
+}
+
+#[test]
+fn oversized_or_unscanned_skill_files_block_import() {
+    let temp = tempfile::tempdir().unwrap();
+    let skill = temp.path().join("oversized");
+    write_skill(
+        &skill,
+        "Oversized",
+        "Use when testing oversized skill files.",
+        "Instruction-only skill.",
+    );
+    fs::write(skill.join("large.txt"), vec![b'x'; 256 * 1024 + 1]).unwrap();
+
+    let inspection = inspect_skill(&skill).unwrap();
+    assert!(!inspection.ok);
+    assert!(inspection
+        .blockers
+        .iter()
+        .any(|blocker| blocker.contains("large file")));
+
+    let target = temp.path().join("target");
+    assert!(import_skill(import_options(&skill, &target)).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn copied_skill_modes_are_normalized() {
+    let temp = tempfile::tempdir().unwrap();
+    let skill = temp.path().join("permissive-source");
+    write_skill(
+        &skill,
+        "Permissive Source",
+        "Use when testing import permissions.",
+        "Instruction-only skill.",
+    );
+    fs::set_permissions(skill.join("SKILL.md"), fs::Permissions::from_mode(0o777)).unwrap();
+    let target = temp.path().join("target");
+
+    let report = import_skill(SkillImportOptions {
+        dry_run: false,
+        ..import_options(&skill, &target)
+    })
+    .unwrap();
+
+    let mode = fs::metadata(report.destination.join("SKILL.md"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(mode, 0o644);
 }

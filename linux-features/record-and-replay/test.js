@@ -6,17 +6,21 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const test = require("node:test");
+const vm = require("node:vm");
 const { execFileSync } = require("node:child_process");
 const {
+  disabledLinuxFeatureCleanupHooks,
   enabledLinuxFeatureIds,
   loadEnabledLinuxFeatures,
   loadLinuxFeaturePatchDescriptors,
+  stageEnabledLinuxFeatureInstall,
 } = require("../../scripts/lib/linux-features.js");
 const {
   applyRecordReplayHudPatch,
   applyRecordReplayPluginGatePatch,
   applyRecordReplayMainBridgePatch,
   descriptors,
+  recordReplayHelperSource,
 } = require("./patch.js");
 
 const featureDir = __dirname;
@@ -73,6 +77,7 @@ test("record-and-replay required files exist", () => {
   assert.equal(fs.existsSync(path.join(__dirname, "README.md")), true);
   assert.equal(fs.existsSync(path.join(__dirname, "patch.js")), true);
   assert.equal(fs.existsSync(path.join(__dirname, "stage.sh")), true);
+  assert.equal(fs.existsSync(path.join(__dirname, "cleanup.sh")), true);
   assert.equal(fs.existsSync(path.join(__dirname, "test.js")), true);
   assert.equal(fs.existsSync(path.join(__dirname, "plugin-template/.codex-plugin/plugin.json")), true);
   assert.equal(fs.existsSync(path.join(__dirname, "plugin-template/.mcp.json")), true);
@@ -139,6 +144,40 @@ test("record-and-replay bridge patch is idempotent and uses execFile", () => {
   assert.doesNotMatch(patched, /shell:true/);
   assert.match(patched, /"--no-screenshot"/);
   assert.match(patched, /"--allow-unsupported"/);
+  assert.doesNotMatch(patched, /"--target"/);
+  assert.doesNotMatch(patched, /"--target-dir"/);
+  assert.doesNotMatch(patched, /"--mode"/);
+});
+
+test("record-and-replay bridge temp trace files are private", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-record-replay-bridge-temp-"));
+  try {
+    const tempRoot = path.join(workspace, "tmp");
+    fs.mkdirSync(tempRoot, { mode: 0o777 });
+    const helperSource = recordReplayHelperSource({
+      childProcessVar: "childProcess",
+      fsVar: "fs",
+      pathVar: "path",
+    });
+    const tracePath = vm.runInNewContext(
+      `${helperSource};codexLinuxRecordReplayWriteTempJson("{\\"ok\\":true}")`,
+      {
+        childProcess: {},
+        fs,
+        path,
+        process: { env: { TMPDIR: tempRoot }, pid: 4242 },
+        Date,
+        Math,
+        String,
+      },
+    );
+    const traceDir = path.dirname(tracePath);
+    assert.equal(fs.statSync(traceDir).mode & 0o777, 0o700);
+    assert.equal(fs.statSync(tracePath).mode & 0o777, 0o600);
+    assert.equal(path.relative(tempRoot, traceDir).startsWith(".."), false);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
 });
 
 test("record-and-replay HUD patch is idempotent and appends runtime UI", () => {
@@ -250,6 +289,83 @@ test("record-and-replay stage hook records marketplace entry and stages plugin",
     const parsedMarketplace = JSON.parse(fs.readFileSync(marketplace, "utf8"));
     assert.equal(parsedMarketplace.plugins.some((plugin) => plugin.name === "record-and-replay" && plugin.source?.path === "./plugins/record-and-replay"), true);
     assert.equal(parsedMarketplace.plugins.some((plugin) => plugin.name === "computer-use"), true);
+  } finally {
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("record-and-replay disabled rebuild exposes cleanup hook for staged payload", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-record-replay-cleanup-"));
+  const originalRoot = process.env.CODEX_LINUX_FEATURES_ROOT;
+  try {
+    const featuresRoot = path.join(workspace, "features");
+    const installDir = path.join(workspace, "install");
+    fs.mkdirSync(featuresRoot, { recursive: true });
+    fs.writeFileSync(path.join(featuresRoot, "features.example.json"), JSON.stringify({ enabled: [] }, null, 2));
+    fs.cpSync(featureDir, path.join(featuresRoot, "record-and-replay"), { recursive: true });
+
+    const staleNative = path.join(installDir, "resources/native/codex-record-replay-linux");
+    const stalePlugin = path.join(installDir, "resources/plugins/openai-bundled/plugins/record-and-replay");
+    const marketplace = path.join(installDir, "resources/plugins/openai-bundled/.agents/plugins/marketplace.json");
+    fs.mkdirSync(stalePlugin, { recursive: true });
+    fs.mkdirSync(path.dirname(staleNative), { recursive: true });
+    fs.mkdirSync(path.dirname(marketplace), { recursive: true });
+    fs.writeFileSync(staleNative, "stale");
+    fs.writeFileSync(path.join(stalePlugin, "stale.txt"), "stale");
+    fs.writeFileSync(
+      marketplace,
+      JSON.stringify({ plugins: [{ name: "record-and-replay" }, { name: "computer-use" }] }),
+    );
+
+    process.env.CODEX_LINUX_FEATURES_ROOT = featuresRoot;
+    const cleanupHooks = disabledLinuxFeatureCleanupHooks({ featuresRoot });
+    assert.deepEqual(cleanupHooks.map((hook) => hook.id), ["record-and-replay"]);
+    execFileSync("bash", [cleanupHooks[0].path], {
+      cwd: workspace,
+      env: { ...process.env, SCRIPT_DIR: repoRoot(), INSTALL_DIR: installDir },
+      stdio: "pipe",
+    });
+    stageEnabledLinuxFeatureInstall(installDir, { featuresRoot });
+
+    assert.equal(fs.existsSync(staleNative), false);
+    assert.equal(fs.existsSync(stalePlugin), false);
+    const parsedMarketplace = JSON.parse(fs.readFileSync(marketplace, "utf8"));
+    assert.deepEqual(parsedMarketplace.plugins.map((plugin) => plugin.name), ["computer-use"]);
+  } finally {
+    if (originalRoot == null) {
+      delete process.env.CODEX_LINUX_FEATURES_ROOT;
+    } else {
+      process.env.CODEX_LINUX_FEATURES_ROOT = originalRoot;
+    }
+    fs.rmSync(workspace, { recursive: true, force: true });
+  }
+});
+
+test("launcher rejects unsafe bundled plugin version path components", () => {
+  const workspace = fs.mkdtempSync(path.join(os.tmpdir(), "codex-record-replay-version-"));
+  try {
+    const launcher = fs.readFileSync(path.join(repoRoot(), "launcher/start.sh.template"), "utf8");
+    const segment = launcher.slice(
+      launcher.indexOf("bundled_plugin_version() {"),
+      launcher.indexOf("bundled_plugin_name() {"),
+    );
+    assert.notEqual(segment.length, 0);
+
+    const run = (version) => {
+      const pluginDir = path.join(workspace, `plugin-${String(version).replace(/[^A-Za-z0-9._-]/g, "_")}`);
+      fs.mkdirSync(path.join(pluginDir, ".codex-plugin"), { recursive: true });
+      const pluginJson = path.join(pluginDir, ".codex-plugin/plugin.json");
+      fs.writeFileSync(pluginJson, JSON.stringify({ name: "record-and-replay", version }));
+      return execFileSync("bash", ["-c", `${segment}\nbundled_plugin_version "$1"`, "probe", pluginJson], {
+        encoding: "utf8",
+      }).trim();
+    };
+
+    assert.equal(run("1.2.3-linux.1"), "1.2.3-linux.1");
+    assert.throws(() => run("."));
+    assert.throws(() => run(".."));
+    assert.throws(() => run("../escape"));
+    assert.throws(() => run("1/2"));
   } finally {
     fs.rmSync(workspace, { recursive: true, force: true });
   }
